@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import type { MuxBackend } from "./mux-backend.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -237,6 +238,20 @@ export function closeSurface(surface: string): void {
   execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
   rebalanceSurfaces();
 }
+
+// ── MuxBackend ──
+
+export const tmuxBackend: MuxBackend = {
+  name: "tmux",
+  isAvailable: isTmuxAvailable,
+  setupHint: muxSetupHint,
+  createSurface,
+  createSurfaceSplit,
+  sendCommand,
+  readScreen,
+  readScreenAsync,
+  closeSurface,
+};
 
 // ── Exit polling ──
 
