@@ -17,11 +17,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { MuxBackend } from "./mux-backend.ts";
 import { tmuxBackend } from "./tmux.ts";
+import { herdrBackend } from "./herdr.ts";
 
 export type MuxBackendName = "tmux" | "herdr";
 
 const backends: Partial<Record<MuxBackendName, MuxBackend>> = {
   tmux: tmuxBackend,
+  herdr: herdrBackend,
 };
 
 function parseBackendName(raw: string): MuxBackendName | "auto" {
