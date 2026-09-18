@@ -1,12 +1,12 @@
 # pi-interactive-subagents
 
-Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
+Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux or herdr panes. Spawn a sub-agent, keep working in the main session, and get the result steered back when it finishes. Fully non-blocking.
 
-**tmux-only fork.** See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
+Supports **tmux** and **herdr** as terminal-multiplexer backends (auto-detected, or configurable — see [Terminal multiplexer backend](#terminal-multiplexer-backend)). See [Acknowledgements](#acknowledgements) for the upstream project, which also supports cmux, zellij, and WezTerm.
 
 ## How it works
 
-`subagent()` returns immediately. The sub-agent runs in its own tmux pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
+`subagent()` returns immediately. The sub-agent runs in its own pane — a right split off the parent pi pane, so pane creation never steals keyboard focus. A live widget above the input tracks every running sub-agent, and when one finishes, its result is steered into the main session as a notification that triggers a new turn.
 
 ```
 ╭─ Subagents ──────────────────────────── 2 running ─╮
@@ -17,7 +17,7 @@ Async subagents for [pi](https://github.com/badlogic/pi-mono), running in tmux p
 
 Spawn several in parallel — they run concurrently and steer results back independently as each finishes.
 
-Panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …).
+On tmux, panes are kept evenly sized: the extension re-applies an `even-horizontal` layout after every spawn and exit (debounced). The layout is a single constant, `SUBAGENT_TMUX_LAYOUT` in `pi-extension/subagents/tmux.ts` — change it to any named tmux layout (`main-vertical`, `tiled`, …). herdr has no equivalent "even out all panes" primitive, so this rebalancing is tmux-only.
 
 If your shell startup is slow and launch commands get dropped before the prompt is ready, raise the delay:
 
@@ -29,7 +29,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 
 | Tool | Description |
 | --- | --- |
-| `subagent` | Spawn a sub-agent in a dedicated tmux pane (async) |
+| `subagent` | Spawn a sub-agent in a dedicated pane (async) |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
@@ -175,18 +175,40 @@ Status display is configured via `config.json` in the extension directory (copy 
 }
 ```
 
+## Terminal multiplexer backend
+
+The extension auto-detects which multiplexer pi is running inside — no configuration needed in the common case. To force a specific backend (or fail fast instead of auto-detecting), set `PI_SUBAGENT_MUX`:
+
+```bash
+export PI_SUBAGENT_MUX=tmux    # or: herdr, auto (default)
+```
+
+Or set it in `config.json` (copy `config.json.example`; it's gitignored):
+
+```json
+{
+  "backend": { "type": "auto" }
+}
+```
+
+Precedence: `PI_SUBAGENT_MUX` env var, then `config.json`'s `backend.type`, then auto-detection (`$TMUX` set → tmux, `$HERDR_ENV=1` → herdr).
+
 ## Requirements
 
 - [pi](https://github.com/badlogic/pi-mono)
-- [tmux](https://github.com/tmux/tmux)
-
-```bash
-tmux new -A -s pi 'pi'
-```
+- One of:
+  - [tmux](https://github.com/tmux/tmux)
+    ```bash
+    tmux new -A -s pi 'pi'
+    ```
+  - [herdr](https://herdr.dev)
+    ```bash
+    herdr
+    ```
 
 ## Acknowledgements
 
-Forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents), which originated the subagent architecture, the multi-multiplexer surface layer, and the status widget; its supervision features were inspired by [RepoPrompt](https://repoprompt.com/).
+Forked from [HazAT/pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents), which originated the subagent architecture, the multi-multiplexer surface layer, and the status widget; its supervision features were inspired by [RepoPrompt](https://repoprompt.com/). This fork trimmed the original's cmux/zellij/WezTerm backends down to tmux, then added herdr; cmux/zellij/WezTerm users should use the upstream project.
 
 ## License
 
