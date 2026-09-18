@@ -2,9 +2,9 @@
  * Integration test harness for pi-interactive-subagents.
  *
  * Provides utilities to:
- * - Detect whether tmux is available
+ * - Detect the active mux backend (tmux or herdr)
  * - Create isolated test environments with test agent definitions
- * - Start real pi sessions in tmux panes
+ * - Start real pi sessions in mux panes
  * - Poll for file creation and screen output
  * - Clean up panes and temp files after tests
  */
