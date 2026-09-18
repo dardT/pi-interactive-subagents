@@ -18,6 +18,15 @@ import { dirname, join } from "node:path";
 import type { MuxBackend } from "./mux-backend.ts";
 import { tmuxBackend } from "./tmux.ts";
 import { herdrBackend } from "./herdr.ts";
+import {
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_CONFIG_EXAMPLE_PATH,
+  parseConfigJson,
+  requireObject,
+  rejectUnsupportedKeys,
+  tryReadConfigFile,
+  invalidConfig,
+} from "./config.ts";
 
 export type MuxBackendName = "tmux" | "herdr";
 
@@ -26,12 +35,12 @@ const backends: Partial<Record<MuxBackendName, MuxBackend>> = {
   herdr: herdrBackend,
 };
 
-function parseBackendName(raw: string): MuxBackendName | "auto" {
+function parseBackendName(raw: string, context: string): MuxBackendName | "auto" {
   const normalized = raw.trim().toLowerCase();
   if (normalized === "tmux" || normalized === "herdr" || normalized === "auto") {
     return normalized;
   }
-  throw new Error(`Invalid PI_SUBAGENT_MUX value "${raw}": expected "tmux", "herdr", or "auto".`);
+  throw new Error(`Invalid ${context} value "${raw}": expected "tmux", "herdr", or "auto".`);
 }
 
 function autoDetectBackendName(): MuxBackendName | undefined {
@@ -43,18 +52,59 @@ function autoDetectBackendName(): MuxBackendName | undefined {
   return undefined;
 }
 
+// ── backend.type config.json slice ──
+
+export interface BackendConfig {
+  type: MuxBackendName | "auto";
+}
+
+export function parseBackendConfig(rawConfig: unknown, source = "config.json"): BackendConfig {
+  const config = requireObject(rawConfig, source, "root");
+  // Unlike `status`, a missing `backend` key is not an error — existing
+  // config.json files that predate this feature only have `status`.
+  if (!("backend" in config)) {
+    return { type: "auto" };
+  }
+  const backend = requireObject(config.backend, source, "backend");
+  rejectUnsupportedKeys(backend, ["type"], source, "backend");
+  if (typeof backend.type !== "string") {
+    invalidConfig(source, "backend.type must be a string");
+  }
+  return { type: parseBackendName(backend.type, "backend.type") };
+}
+
+export function loadBackendConfig(
+  configPath = DEFAULT_CONFIG_PATH,
+  examplePath = DEFAULT_CONFIG_EXAMPLE_PATH,
+): BackendConfig {
+  const file = tryReadConfigFile(configPath, examplePath);
+  if (!file) {
+    // Unlike status, a missing config file entirely is not an error either
+    // — it just means "use auto-detection."
+    return { type: "auto" };
+  }
+  const parsed = parseConfigJson(file.rawConfig, file.sourcePath);
+  return parseBackendConfig(parsed, file.sourcePath);
+}
+
+// Read once at module load, mirroring index.ts's `const statusConfig = loadStatusConfig()`.
+const backendConfig = loadBackendConfig();
+
 /**
  * Resolve which backend is active. Precedence: `PI_SUBAGENT_MUX` env var
- * override, then auto-detect from the environment pi is running in.
- * Throws when nothing can be determined — callers that must not throw
- * (isMuxAvailable, muxSetupHint) catch and fall back.
+ * override, then `config.json`'s `backend.type`, then auto-detect from the
+ * environment pi is running in. Throws when nothing can be determined —
+ * callers that must not throw (isMuxAvailable, muxSetupHint) catch and
+ * fall back.
  */
 export function resolveMuxBackendName(): MuxBackendName {
   const rawOverride = process.env.PI_SUBAGENT_MUX?.trim();
   if (rawOverride) {
-    const parsed = parseBackendName(rawOverride);
+    const parsed = parseBackendName(rawOverride, "PI_SUBAGENT_MUX");
     if (parsed !== "auto") return parsed;
   }
+
+  if (backendConfig.type !== "auto") return backendConfig.type;
 
   const detected = autoDetectBackendName();
   if (detected) return detected;

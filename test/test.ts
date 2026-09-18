@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -30,7 +30,12 @@ import {
   summarizeSessionStats,
 } from "../pi-extension/subagents/session.ts";
 
-import { shellEscape } from "../pi-extension/subagents/mux.ts";
+import {
+  shellEscape,
+  parseBackendConfig,
+  loadBackendConfig,
+  resolveMuxBackendName,
+} from "../pi-extension/subagents/mux.ts";
 import {
   advanceStatusState,
   capStatusLines,
@@ -1062,6 +1067,101 @@ describe("status.ts", () => {
     assert.match(aggregate, /^Subagent status:/);
     assert.match(aggregate, /\+2 more running\./);
     assert.doesNotMatch(aggregate, /\/tmp|\.jsonl/);
+  });
+});
+
+describe("mux.ts backend resolution", () => {
+  describe("parseBackendConfig", () => {
+    it("defaults to auto when the backend key is absent", () => {
+      assert.deepEqual(parseBackendConfig({ status: { enabled: true } }), { type: "auto" });
+    });
+
+    it("parses an explicit backend type", () => {
+      assert.deepEqual(parseBackendConfig({ backend: { type: "tmux" } }), { type: "tmux" });
+      assert.deepEqual(parseBackendConfig({ backend: { type: "herdr" } }), { type: "herdr" });
+      assert.deepEqual(parseBackendConfig({ backend: { type: "auto" } }), { type: "auto" });
+    });
+
+    it("fails fast for invalid config shapes", () => {
+      assert.throws(
+        () => parseBackendConfig({ backend: { type: "zellij" } }),
+        /Invalid backend\.type value "zellij"/,
+      );
+      assert.throws(
+        () => parseBackendConfig({ backend: { type: "tmux", extra: true } }),
+        /backend has unsupported key\(s\): extra/,
+      );
+    });
+  });
+
+  describe("loadBackendConfig", () => {
+    it("loads the shared example's backend.type", () => {
+      const examplePath = fileURLToPath(new URL("../config.json.example", import.meta.url));
+      assert.deepEqual(loadBackendConfig(examplePath), { type: "auto" });
+    });
+
+    it("defaults to auto when neither config.json nor the example exists", () => {
+      withTempDir((dir) => {
+        assert.deepEqual(
+          loadBackendConfig(join(dir, "config.json"), join(dir, "config.json.example")),
+          { type: "auto" },
+        );
+      });
+    });
+
+    it("defaults to auto when config.json exists but has no backend key", () => {
+      withTempDir((dir) => {
+        const configPath = join(dir, "config.json");
+        writeFileSync(configPath, JSON.stringify({ status: { enabled: true } }));
+        assert.deepEqual(loadBackendConfig(configPath, join(dir, "config.json.example")), {
+          type: "auto",
+        });
+      });
+    });
+  });
+
+  describe("resolveMuxBackendName precedence", () => {
+    const savedEnv = { PI_SUBAGENT_MUX: process.env.PI_SUBAGENT_MUX, TMUX: process.env.TMUX, HERDR_ENV: process.env.HERDR_ENV };
+
+    afterEach(() => {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+
+    it("PI_SUBAGENT_MUX overrides auto-detection", () => {
+      process.env.TMUX = "/tmp/tmux-1,1,0";
+      process.env.HERDR_ENV = "";
+      process.env.PI_SUBAGENT_MUX = "herdr";
+      assert.equal(resolveMuxBackendName(), "herdr");
+    });
+
+    it("auto-detects tmux via $TMUX when nothing overrides it", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      process.env.TMUX = "/tmp/tmux-1,1,0";
+      process.env.HERDR_ENV = "";
+      assert.equal(resolveMuxBackendName(), "tmux");
+    });
+
+    it("auto-detects herdr via $HERDR_ENV when $TMUX is unset", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      delete process.env.TMUX;
+      process.env.HERDR_ENV = "1";
+      assert.equal(resolveMuxBackendName(), "herdr");
+    });
+
+    it("throws a clear error when nothing can be determined", () => {
+      delete process.env.PI_SUBAGENT_MUX;
+      delete process.env.TMUX;
+      process.env.HERDR_ENV = "";
+      assert.throws(() => resolveMuxBackendName(), /Could not determine a terminal multiplexer backend/);
+    });
+
+    it("rejects an invalid PI_SUBAGENT_MUX value", () => {
+      process.env.PI_SUBAGENT_MUX = "zellij";
+      assert.throws(() => resolveMuxBackendName(), /Invalid PI_SUBAGENT_MUX value "zellij"/);
+    });
   });
 });
 
