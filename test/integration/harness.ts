@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import {
   isMuxAvailable,
+  activeMuxBackendName,
   createSurface,
   createSurfaceSplit,
   sendCommand,
@@ -32,9 +33,9 @@ import {
   readScreenAsync,
   closeSurface,
   shellEscape,
-} from "../../pi-extension/subagents/tmux.ts";
+} from "../../pi-extension/subagents/mux.ts";
 
-// Re-export tmux primitives for tests
+// Re-export mux primitives for tests
 export {
   createSurface,
   createSurfaceSplit,
@@ -76,11 +77,13 @@ export const PI_TIMEOUT = Number(process.env.PI_TEST_TIMEOUT ?? "120000");
 // ── Backend detection ──
 
 /**
- * Detect whether tmux is available in the current environment.
- * Returns ["tmux"] or [].
+ * Detect the currently-active mux backend (whichever multiplexer this
+ * process is running inside). Returns [backendName] or [] when none is
+ * resolvable — in practice always a single-element list, since a process
+ * can only be inside one multiplexer's pane at a time.
  */
 export function getAvailableBackends(): string[] {
-  return isMuxAvailable() ? ["tmux"] : [];
+  return isMuxAvailable() ? [activeMuxBackendName()] : [];
 }
 
 export function focusSurface(surface: string): void {

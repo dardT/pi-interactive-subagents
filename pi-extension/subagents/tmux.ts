@@ -1,10 +1,12 @@
 /**
- * tmux surface layer — the only terminal multiplexer this extension supports.
+ * tmux MuxBackend implementation.
  *
- * Everything the extension does to a pane goes through the small API in this
- * file: create/split a pane, type a command into it, read its screen, close
- * it, and poll for exit. Keeping the tmux calls isolated here means index.ts
- * stays testable without a multiplexer running.
+ * Everything this file does to a pane goes through tmux CLI calls: create/
+ * split a pane, type a command into it, read its screen, close it. The
+ * primitives below are internal — index.ts and the test harness talk to
+ * mux.ts's dispatcher, which delegates to the `tmuxBackend` object exported
+ * at the bottom of this file. Backend-agnostic logic (shellEscape,
+ * sendLongCommand, pollForExit) lives in mux.ts, not here.
  *
  * Panes are identified by tmux pane ids (e.g. `%12`). Splits always target
  * the parent pi's pane (`$TMUX_PANE`) so they follow the agent rather than
@@ -12,9 +14,6 @@
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import type { MuxBackend } from "./mux-backend.ts";
 
 const execFileAsync = promisify(execFile);
@@ -44,15 +43,11 @@ function hasCommand(command: string): boolean {
  * True when running inside tmux with the tmux binary on PATH.
  * `TMUX` is set by tmux in every process it spawns (shell or pane).
  */
-export function isTmuxAvailable(): boolean {
+function isTmuxAvailable(): boolean {
   return !!process.env.TMUX && hasCommand("tmux");
 }
 
-export function isMuxAvailable(): boolean {
-  return isTmuxAvailable();
-}
-
-export function muxSetupHint(): string {
+function muxSetupHint(): string {
   return "Start pi inside tmux (`tmux new -A -s pi 'pi'`).";
 }
 
@@ -60,12 +55,6 @@ function requireTmux(): void {
   if (!isTmuxAvailable()) {
     throw new Error(`tmux is required for subagents. ${muxSetupHint()}`);
   }
-}
-
-// ── Shell helpers ──
-
-export function shellEscape(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
 // ── Pane layout ──
@@ -86,6 +75,9 @@ let rebalanceTimer: ReturnType<typeof setTimeout> | null = null;
  * Applies SUBAGENT_TMUX_LAYOUT to the parent pi window. Debounced so a burst
  * of parallel spawns or staggered exits collapses into a single layout call,
  * and non-fatal: a cosmetic resize must never break spawning or watching.
+ *
+ * tmux-only: no other backend currently exposes an equivalent "even out all
+ * panes" primitive.
  */
 function rebalanceSurfaces(hintPane?: string): void {
   // Prefer the parent pi pane (stable; survives a closing subagent pane).
@@ -114,7 +106,7 @@ function rebalanceSurfaces(hintPane?: string): void {
  *
  * Returns the new pane id (e.g. `%12`).
  */
-export function createSurface(name: string): string {
+function createSurface(name: string): string {
   void name; // tmux panes are not named; the pi process inside shows its own title.
   return createSurfaceSplit(name, "right", process.env.TMUX_PANE);
 }
@@ -123,7 +115,7 @@ export function createSurface(name: string): string {
  * Create a new split in the given direction from an optional source pane.
  * Returns the new pane id (e.g. `%12`).
  */
-export function createSurfaceSplit(
+function createSurfaceSplit(
   name: string,
   direction: "left" | "right" | "up" | "down",
   fromSurface?: string,
@@ -159,54 +151,16 @@ export function createSurfaceSplit(
  * Typed literally (`-l`) so special characters are not interpreted as keys,
  * then submitted with Enter.
  */
-export function sendCommand(surface: string, command: string): void {
+function sendCommand(surface: string, command: string): void {
   requireTmux();
   execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
   execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
 }
 
 /**
- * Send a long command to a pane by writing it to a script file first.
- * This avoids terminal line-wrapping issues that break commands exceeding the
- * pane's column width when sent character-by-character via sendCommand.
- *
- * By default the script is written to a temp directory, but callers can pass a
- * stable path (for example under session artifacts) so the exact invocation is
- * preserved for debugging.
- *
- * Returns the script path.
- */
-export function sendLongCommand(
-  surface: string,
-  command: string,
-  options?: { scriptPath?: string; scriptPreamble?: string },
-): string {
-  const scriptPath =
-    options?.scriptPath ??
-    join(
-      tmpdir(),
-      "pi-subagent-scripts",
-      `cmd-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.sh`,
-    );
-  mkdirSync(dirname(scriptPath), { recursive: true });
-
-  const scriptParts = ["#!/bin/bash"];
-  if (options?.scriptPreamble) {
-    scriptParts.push(options.scriptPreamble.trimEnd());
-  }
-  scriptParts.push(command);
-
-  writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
-    mode: 0o755,
-  });
-  sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
-  return scriptPath;
-}
-
-/**
  * Read the screen contents of a pane (sync).
  */
-export function readScreen(surface: string, lines = 50): string {
+function readScreen(surface: string, lines = 50): string {
   requireTmux();
   return execFileSync(
     "tmux",
@@ -220,7 +174,7 @@ export function readScreen(surface: string, lines = 50): string {
 /**
  * Read the screen contents of a pane (async).
  */
-export async function readScreenAsync(surface: string, lines = 50): Promise<string> {
+async function readScreenAsync(surface: string, lines = 50): Promise<string> {
   requireTmux();
   const { stdout } = await execFileAsync(
     "tmux",
@@ -233,7 +187,7 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
 /**
  * Close a pane.
  */
-export function closeSurface(surface: string): void {
+function closeSurface(surface: string): void {
   requireTmux();
   execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
   rebalanceSurfaces();
@@ -252,118 +206,3 @@ export const tmuxBackend: MuxBackend = {
   readScreenAsync,
   closeSurface,
 };
-
-// ── Exit polling ──
-
-export interface PollResult {
-  /** How the subagent exited */
-  reason: "done" | "sentinel" | "error";
-  /** Shell exit code (from sentinel). 0 for file-based exits. */
-  exitCode: number;
-  /** Error message if reason is "error" (auto-retry exhausted, provider overload, etc.) */
-  errorMessage?: string;
-}
-
-/**
- * Interpret an `.exit` sidecar payload (written by the error path in
- * subagent-done.ts). Centralized so both the fast and slow paths in
- * pollForExit decode the payload the same way. Clean completions write no
- * sidecar and are detected via the terminal sentinel instead.
- *
- * Note: ask_question does NOT write a `.exit` sidecar — it keeps the session
- * open and signals the parent via a separate `.ask` file (see deliverPendingQuestion).
- */
-function interpretExitSidecar(data: any): PollResult {
-  if (data?.type === "error") {
-    const errorMessage =
-      typeof data.errorMessage === "string" && data.errorMessage.trim() !== ""
-        ? data.errorMessage
-        : "Subagent exited with stopReason=error (no errorMessage in sidecar).";
-    return { reason: "error", exitCode: 1, errorMessage };
-  }
-  return { reason: "done", exitCode: 0 };
-}
-
-export const __pollForExitTest__ = { interpretExitSidecar };
-
-/**
- * Poll until the subagent exits. Checks for a `.exit` sidecar file first
- * (written by the error path), falling back to the terminal sentinel for
- * clean-completion and crash detection.
- */
-export async function pollForExit(
-  surface: string,
-  signal: AbortSignal,
-  options: {
-    interval: number;
-    sessionFile?: string;
-    sentinelFile?: string;
-    onTick?: (elapsed: number) => void;
-  },
-): Promise<PollResult> {
-  const start = Date.now();
-
-  for (;;) {
-    if (signal.aborted) {
-      throw new Error("Aborted while waiting for subagent to finish");
-    }
-
-    // Fast path: check for .exit sidecar file (written by the error path)
-    if (options.sessionFile) {
-      try {
-        const exitFile = `${options.sessionFile}.exit`;
-        if (existsSync(exitFile)) {
-          const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-          rmSync(exitFile, { force: true });
-          return interpretExitSidecar(data);
-        }
-      } catch {}
-    }
-
-    // Check Claude sentinel file (written by plugin Stop hook)
-    if (options.sentinelFile) {
-      try {
-        if (existsSync(options.sentinelFile)) {
-          return { reason: "sentinel", exitCode: 0 };
-        }
-      } catch {}
-    }
-
-    // Slow path: read terminal screen for sentinel (crash detection)
-    try {
-      const screen = await readScreenAsync(surface, 5);
-      const match = screen.match(/__SUBAGENT_DONE_(\d+)__/);
-      if (match) {
-        return { reason: "sentinel", exitCode: parseInt(match[1], 10) };
-      }
-    } catch {
-      // Surface may have been destroyed — check if .exit file appeared in the meantime
-      if (options.sessionFile) {
-        try {
-          const exitFile = `${options.sessionFile}.exit`;
-          if (existsSync(exitFile)) {
-            const data = JSON.parse(readFileSync(exitFile, "utf-8"));
-            rmSync(exitFile, { force: true });
-            return interpretExitSidecar(data);
-          }
-        } catch {}
-      }
-    }
-
-    const elapsed = Math.floor((Date.now() - start) / 1000);
-    options.onTick?.(elapsed);
-
-    await new Promise<void>((resolve, reject) => {
-      if (signal.aborted) return reject(new Error("Aborted"));
-      const timer = setTimeout(() => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      }, options.interval);
-      function onAbort() {
-        clearTimeout(timer);
-        reject(new Error("Aborted"));
-      }
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-  }
-}
