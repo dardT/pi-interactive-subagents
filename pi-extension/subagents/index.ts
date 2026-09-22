@@ -25,6 +25,7 @@ import {
   closeSurface,
   shellEscape,
   readScreen,
+  nameAgent,
 } from "./mux.ts";
 
 import {
@@ -1290,6 +1291,7 @@ async function launchSubagent(
         `# Surface: ${surface}`,
       ].join("\n"),
     });
+    nameAgent(surface, params.name).catch(() => {});
 
     const running: RunningSubagent = {
       id,
@@ -1432,6 +1434,7 @@ async function launchSubagent(
       `# Surface: ${surface}`,
     ].join("\n"),
   });
+  nameAgent(surface, params.name).catch(() => {});
 
   const running: RunningSubagent = {
     id,
@@ -2234,6 +2237,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             ...(resumeMsgFile ? [`# Resume message file: ${resumeMsgFile}`] : []),
           ].join("\n"),
         });
+        nameAgent(surface, name).catch(() => {});
 
         // Register as a running subagent for widget tracking
         const running: RunningSubagent = {

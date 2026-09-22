@@ -43,4 +43,12 @@ export interface MuxBackend {
 
   /** Close a pane. */
   closeSurface(surface: string): void;
+
+  /**
+   * Assign a display name to the agent process running in a pane, for
+   * backends that track named agents (herdr's `agent rename`). Omitted by
+   * backends with no such concept (tmux) — callers must treat a missing
+   * implementation as a no-op.
+   */
+  nameAgent?(surface: string, name: string): Promise<void>;
 }

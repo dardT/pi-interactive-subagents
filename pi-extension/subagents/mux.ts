@@ -178,6 +178,14 @@ export function closeSurface(surface: string): void {
   getMuxBackend().closeSurface(surface);
 }
 
+/**
+ * Assign a display name to the agent running in a pane. No-op for backends
+ * with no agent-naming concept (tmux) — see MuxBackend.nameAgent.
+ */
+export async function nameAgent(surface: string, name: string): Promise<void> {
+  await getMuxBackend().nameAgent?.(surface, name);
+}
+
 // ── Shell helpers ──
 
 export function shellEscape(s: string): string {

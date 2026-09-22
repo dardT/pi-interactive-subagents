@@ -169,6 +169,55 @@ function closeSurface(surface: string): void {
   execFileSync("herdr", ["pane", "close", surface], { encoding: "utf8" });
 }
 
+// ── Agent naming ──
+
+/**
+ * herdr agent names must match `[a-z][a-z0-9_-]{0,31}`. Subagent display
+ * names are usually already-safe — derived from an agent definition's
+ * filename under ./agents/ (see discoverAgentDefinitions in index.ts), with
+ * a numeric "-2", "-3", ... suffix for duplicates — but a user-supplied
+ * cosmetic `name` isn't constrained the same way, so sanitize before handing
+ * it to herdr.
+ */
+function sanitizeAgentName(name: string): string {
+  let slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!slug) slug = "agent";
+  if (!/^[a-z]/.test(slug)) slug = `a-${slug}`;
+  return slug.slice(0, 32);
+}
+
+/**
+ * Tag the agent process running in a pane with its subagent display name.
+ *
+ * The pane run we use to launch a subagent (see sendCommand) is what herdr's
+ * docs call a "manually launched agent": herdr auto-detects the pi/claude
+ * process by kind but leaves it unnamed, addressable only by pane id, until
+ * renamed. See https://herdr.dev/docs/cli-reference/#agents ("agent rename").
+ *
+ * Detection lags the shell actually exec'ing into the agent process, so
+ * `agent rename` can fail for a moment right after launch — retry briefly.
+ * Naming is cosmetic: give up silently rather than fail the spawn.
+ */
+async function nameAgent(surface: string, name: string): Promise<void> {
+  if (!isHerdrAvailable()) return;
+
+  const agentName = sanitizeAgentName(name);
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      await execFileAsync("herdr", ["agent", "rename", surface, agentName], { encoding: "utf8" });
+      return;
+    } catch {
+      if (Date.now() >= deadline) return;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+}
+
 // ── MuxBackend ──
 
 export const herdrBackend: MuxBackend = {
@@ -181,4 +230,5 @@ export const herdrBackend: MuxBackend = {
   readScreen,
   readScreenAsync,
   closeSurface,
+  nameAgent,
 };
