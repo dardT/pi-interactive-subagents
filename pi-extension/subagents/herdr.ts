@@ -6,8 +6,9 @@
  * text directly, mirroring tmux's `capture-pane -p`. See https://herdr.dev.
  *
  * Panes are identified by herdr pane ids (e.g. `w1:p3`, workspace-qualified —
- * not tmux's `%N`). Splits always target the parent pi's pane
- * (`$HERDR_PANE_ID`) so they follow the agent rather than the user's focus.
+ * not tmux's `%N`). Subagents are isolated in dedicated `Subagents` tabs:
+ * each tab holds no more than a 2×2 grid (four panes), and overflow starts a
+ * numbered tab rather than shrinking existing panes indefinitely.
  */
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -77,15 +78,60 @@ function runHerdrJson(args: string[]): any {
 // ── Surface primitives ──
 
 const SPLITTABLE_DIRECTIONS = new Set(["right", "down"]);
+const SUBAGENT_TAB_LABEL = "Subagents";
+const MAX_PANES_PER_SUBAGENT_TAB = 4;
+
+interface SubagentTab {
+  id: string;
+  rootPane: string;
+  surfaces: string[];
+}
+
+const subagentTabs: SubagentTab[] = [];
+let nextSubagentTabNumber = 1;
+
+/** Create a background tab and return its empty root pane. */
+function createSubagentTab(): SubagentTab {
+  requireHerdr();
+
+  // Reuse the primary label after all managed subagent tabs have closed;
+  // otherwise retain monotonically numbered overflow tabs in this session.
+  const tabNumber = subagentTabs.length === 0 ? 1 : nextSubagentTabNumber++;
+  nextSubagentTabNumber = Math.max(nextSubagentTabNumber, tabNumber + 1);
+  const args = ["tab", "create"];
+  if (process.env.HERDR_WORKSPACE_ID) {
+    args.push("--workspace", process.env.HERDR_WORKSPACE_ID);
+  }
+  args.push("--cwd", process.cwd(), "--label", tabNumber === 1 ? SUBAGENT_TAB_LABEL : `${SUBAGENT_TAB_LABEL} ${tabNumber}`, "--no-focus");
+
+  const response = runHerdrJson(args);
+  const tabId = response?.result?.tab?.tab_id;
+  const rootPane = response?.result?.root_pane?.pane_id;
+  if (typeof tabId !== "string" || typeof rootPane !== "string" || !tabId || !rootPane) {
+    throw new Error(`Unexpected "herdr tab create" response: ${JSON.stringify(response)}`);
+  }
+
+  const tab = { id: tabId, rootPane, surfaces: [rootPane] };
+  subagentTabs.push(tab);
+  return tab;
+}
 
 /**
- * Create a new pane for a subagent: a right split off the parent pi's pane,
- * so new panes follow the agent rather than the user's focus.
- * Returns the new pane's id (e.g. `w1:p7`).
+ * Create a pane in a dedicated `Subagents` tab. Slots are filled in a stable
+ * 2×2 pattern: root, right, root-down, right-down. A fifth concurrent agent
+ * receives a new numbered tab rather than another split in the same tab.
  */
 function createSurface(name: string): string {
   void name; // herdr panes are not named at the pane level; pi's own title shows in the tab.
-  return createSurfaceSplit(name, "right", process.env.HERDR_PANE_ID);
+  let tab = subagentTabs.find((candidate) => candidate.surfaces.length < MAX_PANES_PER_SUBAGENT_TAB);
+  if (!tab) return createSubagentTab().rootPane;
+
+  const count = tab.surfaces.length;
+  const source = count === 1 ? tab.surfaces[0] : count === 2 ? tab.surfaces[0] : tab.surfaces[1];
+  const direction = count === 1 ? "right" : "down";
+  const pane = createSurfaceSplit(name, direction, source);
+  tab.surfaces.push(pane);
+  return pane;
 }
 
 /**
@@ -167,6 +213,15 @@ async function readScreenAsync(surface: string, lines = 50): Promise<string> {
 function closeSurface(surface: string): void {
   requireHerdr();
   execFileSync("herdr", ["pane", "close", surface], { encoding: "utf8" });
+
+  const tab = subagentTabs.find((candidate) => candidate.surfaces.includes(surface));
+  if (!tab) return;
+  tab.surfaces = tab.surfaces.filter((candidate) => candidate !== surface);
+  // Herdr closes a tab after its final pane is closed. Drop the local record
+  // too so the next spawn creates a fresh, correctly labelled tab.
+  if (tab.surfaces.length === 0) {
+    subagentTabs.splice(subagentTabs.indexOf(tab), 1);
+  }
 }
 
 // ── Agent naming ──
