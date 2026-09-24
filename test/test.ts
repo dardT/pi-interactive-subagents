@@ -2028,6 +2028,83 @@ describe("tool registration", () => {
     assert.equal(names.includes("subagent_interrupt"), false);
     assert.equal(names.includes("subagent_resume"), false);
   });
+
+  it("registers subagent_kill with name required only", () => {
+    const { api, registeredTools } = createMockExtensionApi();
+    (subagentsModule as any).default(api);
+    const tool = registeredTools.find((t) => t.name === "subagent_kill");
+    assert.ok(tool, "expected subagent_kill tool to be registered");
+
+    const props = tool.parameters.properties;
+    assert.deepEqual(Object.keys(props).sort(), ["name"], "only name should be a parameter");
+    assert.equal(props.name.type, "string");
+    assert.deepEqual(
+      tool.parameters.required?.slice().sort(),
+      ["name"],
+      "name should be required",
+    );
+  });
+});
+
+describe("subagent_kill", () => {
+  const testApi = (subagentsModule as any).__test__;
+
+  // Start every case from an empty tracking map so the tests are isolated
+  // regardless of what earlier cases left behind.
+  function clearRunning(): void {
+    for (const [id] of testApi.runningSubagents) testApi.runningSubagents.delete(id);
+  }
+
+  it("killRunningByName aborts the watcher, closes the pane, and drops the agent", () => {
+    clearRunning();
+    const ac = new AbortController();
+    let closed: string | null = null;
+    testApi.runningSubagents.set("kill-1", {
+      id: "kill-1",
+      name: "kill-target",
+      surface: "w1:p9",
+      abortController: ac,
+    } as any);
+
+    const result = testApi.killRunningByName("kill-target", (surface) => {
+      closed = surface;
+    });
+
+    assert.equal((result as any).error, undefined, "a known agent should kill cleanly");
+    assert.equal((result as any).running.name, "kill-target");
+    assert.equal(closed, "w1:p9", "should close the subagent's pane");
+    assert.equal(ac.signal.aborted, true, "should abort the watcher controller");
+    assert.equal(testApi.runningSubagents.has("kill-1"), false, "should drop from tracking map");
+  });
+
+  it("killRunningByName reports an unknown name", () => {
+    clearRunning();
+    const result = testApi.killRunningByName("nope");
+    assert.equal((result as any).running, undefined);
+    assert.match((result as any).error, /No running subagent named "nope"/);
+  });
+
+  it("killRunningByName surfaces a close() failure without dropping the agent", () => {
+    clearRunning();
+    const ac = new AbortController();
+    testApi.runningSubagents.set("kill-2", {
+      id: "kill-2",
+      name: "boom",
+      surface: "w1:p10",
+      abortController: ac,
+    } as any);
+
+    const result = testApi.killRunningByName("boom", () => {
+      throw new Error("pane gone");
+    });
+
+    assert.equal((result as any).running, undefined);
+    assert.match((result as any).error, /Failed to kill subagent "boom": pane gone/);
+    // A failed close leaves the agent in flight so it isn't silently lost.
+    assert.equal(testApi.runningSubagents.has("kill-2"), true);
+    // The watcher was still aborted even though the pane close failed.
+    assert.equal(ac.signal.aborted, true);
+  });
 });
 
 describe("subagent activity snapshots", () => {

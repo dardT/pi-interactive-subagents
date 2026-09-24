@@ -31,6 +31,7 @@ export PI_SUBAGENT_SHELL_READY_DELAY_MS=2500   # default: 500
 | --- | --- |
 | `subagent` | Spawn a sub-agent in a dedicated pane (async) |
 | `subagent_message` | Message a sub-agent by name — steers it if running, resumes its session if finished |
+| `subagent_kill` | Force-stop a currently running sub-agent by name — closes its pane and stops its watcher |
 | `subagents_list` | List available agent definitions |
 | `ask_question` | *(sub-agent sessions only)* Ask the orchestrator a question and wait for the reply |
 

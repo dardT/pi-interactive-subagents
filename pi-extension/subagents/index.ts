@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { keyHint } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, keyHint } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, join, resolve } from "node:path";
@@ -648,6 +648,9 @@ const RUNNING_CHILDREN_COUNT_KEY = Symbol.for("pi-subagents/running-children-cou
 let latestCtx: ExtensionContext | null = null;
 /** Latest ExtensionAPI, used to deliver ask_question notifications from the watcher. */
 let latestPi: ExtensionAPI | null = null;
+/** The user's editor component factory, preserved while wrapping Pi's interrupt handling. */
+let baseEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]> | undefined;
+let hasCapturedBaseEditorFactory = false;
 
 /** Interval timer for widget re-renders. */
 let widgetInterval: ReturnType<typeof setInterval> | null = null;
@@ -1060,6 +1063,33 @@ function handleSubagentSteer(
   };
 }
 
+/**
+ * Force-stop a running sub-agent: abort its watcher (so pollForExit exits
+ * cleanly as "cancelled" rather than erroring), close its pane, and drop it
+ * from the live tracking map. The injected closer defaults to the mux
+ * backend's closeSurface; tests pass a fake so no real terminal is touched.
+ */
+function killRunningByName(
+  name: string,
+  close: (surface: string) => void = closeSurface,
+): { running: RunningSubagent } | { error: string } {
+  const resolved = resolveRunningByName(name);
+  if ("error" in resolved) return { error: resolved.error };
+
+  const running = resolved.running;
+  // Abort first so the background watcher's pollForExit sees signal.aborted and
+  // returns a clean "cancelled" result (and re-delivers the completion steer).
+  running.abortController?.abort();
+  try {
+    close(running.surface);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { error: `Failed to kill subagent "${running.name}": ${message}` };
+  }
+  runningSubagents.delete(running.id);
+  return { running };
+}
+
 function startStatusRefresh(pi: ExtensionAPI) {
   if (!statusConfig.enabled || statusInterval) return;
 
@@ -1137,6 +1167,7 @@ export const __test__ = {
   observeRunningSubagent,
   getToolExtensionPath,
   resolveRunningByName,
+  killRunningByName,
   uniqueRunningName,
   reservedNames,
   steerSubagent,
@@ -1649,6 +1680,65 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    if (!hasCapturedBaseEditorFactory) {
+      baseEditorFactory = ctx.ui.getEditorComponent();
+      hasCapturedBaseEditorFactory = true;
+    } else {
+      // Reinstall the original before wrapping again after a session change.
+      ctx.ui.setEditorComponent(baseEditorFactory);
+    }
+    const previousEditorFactory = baseEditorFactory;
+    let cancelConfirmationPending = false;
+    ctx.ui.setEditorComponent((tui, theme, keybindings) => {
+      const editor = previousEditorFactory
+        ? previousEditorFactory(tui, theme, keybindings)
+        : new CustomEditor(tui, theme, keybindings);
+      const editorWithInput = editor as typeof editor & {
+        handleInput: (data: string) => void;
+        isShowingAutocomplete?: () => boolean;
+      };
+      const originalHandleInput = editorWithInput.handleInput.bind(editorWithInput);
+      editorWithInput.handleInput = (data: string) => {
+        // Match Pi's configured app.interrupt binding, and preserve its
+        // autocomplete-first Escape behavior before prompting about children.
+        if (
+          !keybindings.matches(data, "app.interrupt") ||
+          editorWithInput.isShowingAutocomplete?.() ||
+          cancelConfirmationPending ||
+          ctx.isIdle() ||
+          runningSubagents.size === 0
+        ) {
+          originalHandleInput(data);
+          return;
+        }
+
+        cancelConfirmationPending = true;
+        const count = runningSubagents.size;
+        void ctx.ui.confirm(
+          "Kill all subagents?",
+          `Cancel the current operation and kill all ${count} running subagent${count === 1 ? "" : "s"}?`,
+        ).then((confirmed) => {
+          if (!confirmed) {
+            // A declined confirmation falls back to Pi's ordinary interrupt.
+            originalHandleInput(data);
+            return;
+          }
+          ctx.abort();
+          for (const agent of [...runningSubagents.values()]) {
+            const result = killRunningByName(agent.name);
+            if ("error" in result) ctx.ui.notify(result.error, "error");
+          }
+          updateWidget();
+          ctx.ui.notify(`Killed ${count} running subagent${count === 1 ? "" : "s"}.`, "info");
+        }).catch((error: unknown) => {
+          ctx.ui.notify(`Could not confirm subagent cancellation: ${error instanceof Error ? error.message : String(error)}`, "error");
+          originalHandleInput(data);
+        }).finally(() => {
+          cancelConfirmationPending = false;
+        });
+      };
+      return editor;
+    });
     // pi runs multiple sessions in one process. A prior session's shutdown
     // aborts the shared module poll-abort controller; install a fresh one so
     // subagents spawned in this session aren't watched against a dead signal.
@@ -1660,7 +1750,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   });
 
   // Clean up on session shutdown
-  pi.on("session_shutdown", (_event, _ctx) => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    ctx.ui.setEditorComponent(baseEditorFactory);
+    baseEditorFactory = undefined;
+    hasCapturedBaseEditorFactory = false;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -2464,6 +2557,85 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
     };
   });
+
+  // ── subagent_kill tool ──
+  pi.registerTool({
+      name: "subagent_kill",
+      label: "Kill Subagent",
+      description:
+        "Force-stop a currently running sub-agent by its exact display name. Closes the sub-agent's " +
+        "terminal pane and stops its background watcher immediately. " +
+        "`name` is required and must match a sub-agent that is still running (see subagents_list or the Subagents widget). " +
+        "Has no effect on finished sub-agents — use it only for agents that are still active. " +
+        "Returns immediately; the parent session is notified that the agent ended.",
+      promptSnippet:
+        "Force-stop a running sub-agent by name: closes its pane and stops its watcher.",
+      parameters: Type.Object({
+        name: Type.String({
+          description:
+            "Exact display name of a currently-running subagent to stop. Has no effect on finished subagents.",
+        }),
+      }),
+
+      renderCall(args, theme) {
+        const target = args.name ?? "(unknown)";
+        return new Text(
+          "✗ " + theme.fg("toolTitle", theme.bold(target)) + theme.fg("dim", " — kill"),
+          0,
+          0,
+        );
+      },
+
+      renderResult(result, _opts, theme) {
+        const details = result.details as any;
+
+        if (details?.status === "killed") {
+          return new Text(
+            theme.fg("error", "✗") +
+              " " +
+              theme.fg("toolTitle", theme.bold(details.name ?? "subagent")) +
+              theme.fg("dim", " — killed"),
+            0,
+            0,
+          );
+        }
+
+        const text = typeof result.content[0]?.text === "string" ? result.content[0].text : "";
+        return new Text(theme.fg("error", text), 0, 0);
+      },
+
+      async execute(_toolCallId, params) {
+        const requestedName = params.name?.trim();
+        if (!requestedName) {
+          const err = "Provide the exact display name of the running subagent to kill.";
+          return { content: [{ type: "text" as const, text: err }], details: { error: err } };
+        }
+
+        if (!isMuxAvailable()) {
+          return muxUnavailableResult();
+        }
+
+        // Abort the watcher, close the pane, and drop it from tracking.
+        // Aborting makes the background pollForExit exit cleanly as "cancelled"
+        // (and re-delivers the completion steer that wakes the parent session).
+        const result = killRunningByName(requestedName);
+        if ("error" in result) {
+          return { content: [{ type: "text" as const, text: result.error }], details: { error: result.error } };
+        }
+
+        // killRunningByName already removed it from the tracking map — just
+        // refresh the widget to reflect the closed pane.
+        updateWidget();
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Killed running subagent "${result.running.name}". Its pane is closed and its watcher has stopped.`,
+          }],
+          details: { id: result.running.id, name: result.running.name, status: "killed" },
+        };
+      },
+    });
 
   // ── subagent_status message renderer ──
   pi.registerMessageRenderer("subagent_status", (message, options, theme) => {
