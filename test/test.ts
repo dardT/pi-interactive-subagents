@@ -1272,10 +1272,12 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("bundled scout/researcher/worker all resolve as non-interactive (auto-exit)", () => {
+  it("bundled scout/researcher/worker use the Luna medium-thinking profile and auto-exit", () => {
     for (const name of ["scout", "researcher", "worker"]) {
       const defs = testApi.loadAgentDefaults(name);
       assert.ok(defs, `expected bundled agent ${name} to be discoverable`);
+      assert.equal(defs.model, "openai-codex/gpt-6-luna");
+      assert.equal(defs.thinking, "medium");
       assert.equal(
         testApi.resolveEffectiveInteractive({ name, task: "" }, defs),
         false,
